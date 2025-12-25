@@ -35,6 +35,12 @@ class Config:
     # Zep配置
     ZEP_API_KEY = os.environ.get('ZEP_API_KEY')
     
+    # Graphiti 自托管配置
+    USE_GRAPHITI = os.environ.get('USE_GRAPHITI', 'false').lower() == 'true'
+    GRAPH_BACKEND = os.environ.get('GRAPH_BACKEND', 'falkordb')  # falkordb / neo4j
+    FALKORDB_HOST = os.environ.get('FALKORDB_HOST', 'localhost')
+    FALKORDB_PORT = int(os.environ.get('FALKORDB_PORT', '6379'))
+    
     # 文件上传配置
     MAX_CONTENT_LENGTH = 50 * 1024 * 1024  # 50MB
     UPLOAD_FOLDER = os.path.join(os.path.dirname(__file__), '../uploads')
@@ -69,7 +75,28 @@ class Config:
         errors = []
         if not cls.LLM_API_KEY:
             errors.append("LLM_API_KEY 未配置")
-        if not cls.ZEP_API_KEY:
-            errors.append("ZEP_API_KEY 未配置")
+        # 根据使用的后端验证配置
+        if cls.USE_GRAPHITI:
+            # 使用 Graphiti 自托管，不需要 ZEP_API_KEY
+            pass
+        else:
+            if not cls.ZEP_API_KEY:
+                errors.append("ZEP_API_KEY 未配置（或设置 USE_GRAPHITI=true 使用自托管）")
         return errors
+    
+    @classmethod
+    def get_graph_backend_info(cls):
+        """获取当前图谱后端信息"""
+        if cls.USE_GRAPHITI:
+            return {
+                "backend": "graphiti",
+                "database": cls.GRAPH_BACKEND,
+                "host": cls.FALKORDB_HOST,
+                "port": cls.FALKORDB_PORT,
+            }
+        else:
+            return {
+                "backend": "zep_cloud",
+                "api_key_configured": bool(cls.ZEP_API_KEY),
+            }
 

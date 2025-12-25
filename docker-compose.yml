@@ -1,0 +1,62 @@
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: mirofish-backend
+    ports:
+      - "5002:5002"
+    environment:
+      - FLASK_HOST=0.0.0.0
+      - FLASK_PORT=5002
+    env_file:
+      - .env
+    volumes:
+      - ./backend:/app
+      - /app/.venv  # Exclude virtual environment from volume mount
+    restart: unless-stopped
+    networks:
+      - mirofish-network
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: mirofish-frontend
+    ports:
+      - "3001:3001"
+    environment:
+      - VITE_API_URL=http://backend:5002
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules  # Exclude node_modules from volume mount
+    depends_on:
+      - backend
+    restart: unless-stopped
+    networks:
+      - mirofish-network
+
+  # FalkorDB - Graphiti 知识图谱存储
+  falkordb:
+    image: falkordb/falkordb:latest
+    container_name: mirofish-falkordb
+    ports:
+      - "6380:6379"    # Redis 协议（避免与系统 Redis 冲突）
+      - "3002:3000"    # FalkorDB 浏览器
+    volumes:
+      - falkordb_data:/data
+    restart: unless-stopped
+    networks:
+      - mirofish-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+networks:
+  mirofish-network:
+    driver: bridge
+
+volumes:
+  falkordb_data:

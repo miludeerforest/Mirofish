@@ -80,12 +80,23 @@ class LLMClient:
         Returns:
             解析后的JSON对象
         """
+        # 不使用 response_format 参数，因为某些模型（如 Gemini）不支持
         response = self.chat(
             messages=messages,
             temperature=temperature,
-            max_tokens=max_tokens,
-            response_format={"type": "json_object"}
+            max_tokens=max_tokens
         )
         
-        return json.loads(response)
+        # 尝试从响应中提取 JSON（处理可能的 markdown 代码块）
+        text = response.strip()
+        
+        # 移除可能的 markdown 代码块标记
+        if text.startswith("```json"):
+            text = text[7:]
+        elif text.startswith("```"):
+            text = text[3:]
+        if text.endswith("```"):
+            text = text[:-3]
+        
+        return json.loads(text.strip())
 
