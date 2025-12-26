@@ -7,6 +7,9 @@
         <a class="history-link" @click="router.push('/reports')">
           📊 历史报告
         </a>
+        <a class="settings-link" @click="router.push('/settings')">
+          ⚙️ 设置
+        </a>
         <a href="https://github.com/666ghj/MiroFish" target="_blank" class="github-link">
           访问我们的Github主页 <span class="arrow">↗</span>
         </a>
@@ -365,6 +368,25 @@ const startSimulation = () => {
 }
 
 .history-link:hover {
+  opacity: 0.8;
+  background: rgba(255,255,255,0.15);
+}
+
+.settings-link {
+  color: var(--white);
+  text-decoration: none;
+  font-family: var(--font-mono);
+  font-size: 0.9rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: opacity 0.2s;
+  padding: 6px 12px;
+  background: rgba(255,255,255,0.1);
+  border-radius: 4px;
+  margin-left: 12px;
+}
+
+.settings-link:hover {
   opacity: 0.8;
   background: rgba(255,255,255,0.15);
 }

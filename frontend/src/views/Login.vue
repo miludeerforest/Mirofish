@@ -46,6 +46,7 @@
 <script setup>
 import { ref } from 'vue'
 import { useRouter } from 'vue-router'
+import { login } from '../api/auth'
 
 const router = useRouter()
 const username = ref('')
@@ -53,26 +54,23 @@ const password = ref('')
 const error = ref('')
 const loading = ref(false)
 
-// 默认演示账户 (可在部署时通过环境变量覆盖)
-const VALID_USERNAME = import.meta.env.VITE_DEMO_USERNAME || 'demo'
-const VALID_PASSWORD = import.meta.env.VITE_DEMO_PASSWORD || 'demo123'
-
-const handleLogin = () => {
+const handleLogin = async () => {
   error.value = ''
   loading.value = true
   
-  // 模拟网络延迟
-  setTimeout(() => {
-    if (username.value === VALID_USERNAME && password.value === VALID_PASSWORD) {
-      // 登录成功，保存认证状态
-      localStorage.setItem('mirofish_auth', 'true')
-      localStorage.setItem('mirofish_user', username.value)
-      router.push('/')
-    } else {
-      error.value = '用户名或密码错误'
-    }
-    loading.value = false
-  }, 500)
+  const res = await login(username.value, password.value)
+  
+  if (res.success && res.data) {
+    // 登录成功，保存认证状态
+    localStorage.setItem('mirofish_auth', 'true')
+    localStorage.setItem('mirofish_user', res.data.username)
+    localStorage.setItem('mirofish_token', res.data.token)
+    router.push('/')
+  } else {
+    error.value = res.error || '登录失败'
+  }
+  
+  loading.value = false
 }
 </script>
 

@@ -7,6 +7,7 @@ import SimulationRunView from '../views/SimulationRunView.vue'
 import ReportView from '../views/ReportView.vue'
 import ReportHistoryView from '../views/ReportHistoryView.vue'
 import InteractionView from '../views/InteractionView.vue'
+import SettingsView from '../views/SettingsView.vue'
 
 const routes = [
   {
@@ -60,6 +61,12 @@ const routes = [
     name: 'Interaction',
     component: InteractionView,
     props: true,
+    meta: { requiresAuth: true }
+  },
+  {
+    path: '/settings',
+    name: 'Settings',
+    component: SettingsView,
     meta: { requiresAuth: true }
   }
 ]

@@ -13,6 +13,9 @@ Thumbs.db
 # Docker 开发配置（不提交）
 docker-compose.override.yml
 
+# 用户凭证（不提交）
+backend/app/api/.credentials.json
+
 # Python
 __pycache__/
 *.py[cod]
