@@ -21,7 +21,7 @@ services:
         reservations:
           memory: 1G
     healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:5002/api/simulation/list"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5002/api/simulation/list', timeout=5)"]
       interval: 30s
       timeout: 10s
       retries: 3
