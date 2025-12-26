@@ -176,3 +176,11 @@ export const interviewAgents = (data) => {
   return requestWithRetry(() => service.post('/api/simulation/interview/batch', data), 3, 1000)
 }
 
+/**
+ * 更新模拟配置（用于 OOM 恢复后调整参数）
+ * @param {Object} data - { simulation_id, updates: { total_simulation_hours?, agents_per_hour_max? } }
+ */
+export const updateSimulationConfig = (data) => {
+  return service.post('/api/simulation/config/update', data)
+}
+

@@ -1,5 +1,28 @@
 <template>
   <div class="report-panel">
+    <!-- 失败状态横幅 -->
+    <div v-if="reportFailed" class="failure-banner">
+      <div class="failure-info">
+        <span class="failure-icon">⚠️</span>
+        <div class="failure-text">
+          <strong>报告生成中断</strong>
+          <p class="failure-reason">{{ failureReason }}</p>
+          <p class="progress-info">已完成 {{ completedSections }}/{{ totalSections }} 个章节</p>
+        </div>
+      </div>
+      <div class="failure-actions">
+        <button class="btn-resume" @click="handleResumeReport" :disabled="isRetrying">
+          <svg v-if="!isRetrying" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
+          <span v-if="isRetrying" class="loading-spinner-small"></span>
+          {{ isRetrying ? '处理中...' : '继续生成' }}
+        </button>
+        <button class="btn-regenerate" @click="handleRegenerateReport" :disabled="isRetrying">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+          重新生成
+        </button>
+      </div>
+    </div>
+
     <!-- Main Split Layout -->
     <div class="main-split-layout">
       <!-- LEFT PANEL: Report Style -->
@@ -128,13 +151,23 @@
           </div>
 
           <!-- Next Step Button - 在完成后显示 -->
-          <button v-if="isComplete" class="next-step-btn" @click="goToInteraction">
-            <span>进入深度互动</span>
-            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
-              <line x1="5" y1="12" x2="19" y2="12"></line>
-              <polyline points="12 5 19 12 12 19"></polyline>
-            </svg>
-          </button>
+          <div v-if="isComplete" class="complete-actions">
+            <button class="download-btn" @click="handleDownloadReport">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                <polyline points="7 10 12 15 17 10"></polyline>
+                <line x1="12" y1="15" x2="12" y2="3"></line>
+              </svg>
+              <span>下载报告</span>
+            </button>
+            <button class="next-step-btn" @click="goToInteraction">
+              <span>进入深度互动</span>
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+                <line x1="5" y1="12" x2="19" y2="12"></line>
+                <polyline points="12 5 19 12 12 19"></polyline>
+              </svg>
+            </button>
+          </div>
 
           <div class="workflow-divider"></div>
         </div>
@@ -394,7 +427,7 @@
 <script setup>
 import { ref, computed, watch, onMounted, onUnmounted, nextTick, h, reactive } from 'vue'
 import { useRouter } from 'vue-router'
-import { getAgentLog, getConsoleLog } from '../api/report'
+import { getAgentLog, getConsoleLog, resumeReport, generateReport, downloadReport } from '../api/report'
 
 const router = useRouter()
 
@@ -410,6 +443,13 @@ const emit = defineEmits(['add-log', 'update-status'])
 const goToInteraction = () => {
   if (props.reportId) {
     router.push({ name: 'Interaction', params: { reportId: props.reportId } })
+  }
+}
+
+// 下载报告
+const handleDownloadReport = () => {
+  if (props.reportId) {
+    downloadReport(props.reportId)
   }
 }
 
@@ -430,6 +470,7 @@ const leftPanel = ref(null)
 const rightPanel = ref(null)
 const logContent = ref(null)
 const showRawResult = reactive({})
+const isRetrying = ref(false)  // 是否正在重试
 
 // Toggle functions
 const toggleRawResult = (timestamp, event) => {
@@ -1670,13 +1711,91 @@ const QuickSearchDisplay = {
 }
 
 // Computed
+// ========== 失败状态检测与恢复 ==========
+const reportFailed = computed(() => {
+  // 检查日志中是否有 error action
+  return agentLogs.value.some(log => log.action === 'error')
+})
+
+const failureReason = computed(() => {
+  const errorLog = agentLogs.value.find(log => log.action === 'error')
+  if (errorLog?.details?.error) {
+    const error = errorLog.details.error
+    if (error.includes('400')) {
+      return '请求参数错误 (400)，可能是 API 临时异常'
+    }
+    if (error.includes('429')) {
+      return 'API 请求过于频繁 (429)，请稍后重试'
+    }
+    if (error.includes('500') || error.includes('502') || error.includes('503')) {
+      return 'API 服务暂时不可用，请稍后重试'
+    }
+    return error
+  }
+  return '报告生成过程中发生错误'
+})
+
+// 恢复报告生成（断点续传）
+const handleResumeReport = async () => {
+  if (!props.reportId || isRetrying.value) return
+  
+  isRetrying.value = true
+  emit('add-log', '正在恢复报告生成...')
+  
+  try {
+    const res = await resumeReport(props.reportId)
+    if (res.success && res.data) {
+      emit('add-log', `✓ 报告恢复任务已启动，跳过章节: ${res.data.skipped_sections?.join(', ') || '无'}`)
+      // 重置状态，开始重新轮询日志
+      agentLogs.value = agentLogs.value.filter(log => log.action !== 'error')
+      isComplete.value = false
+      startLogPolling()
+    } else {
+      emit('add-log', `✗ 恢复失败: ${res.error || '未知错误'}`)
+    }
+  } catch (err) {
+    emit('add-log', `✗ 恢复异常: ${err.message}`)
+  } finally {
+    isRetrying.value = false
+  }
+}
+
+// 重新生成报告
+const handleRegenerateReport = async () => {
+  if (!props.simulationId || isRetrying.value) return
+  
+  isRetrying.value = true
+  emit('add-log', '正在重新生成报告...')
+  
+  try {
+    const res = await generateReport({
+      simulation_id: props.simulationId,
+      force_regenerate: true
+    })
+    if (res.success && res.data) {
+      const newReportId = res.data.report_id
+      emit('add-log', `✓ 报告重新生成任务已启动: ${newReportId}`)
+      // 跳转到新报告页面
+      router.push({ name: 'Report', params: { reportId: newReportId } })
+    } else {
+      emit('add-log', `✗ 重新生成失败: ${res.error || '未知错误'}`)
+    }
+  } catch (err) {
+    emit('add-log', `✗ 重新生成异常: ${err.message}`)
+  } finally {
+    isRetrying.value = false
+  }
+}
+
 const statusClass = computed(() => {
+  if (reportFailed.value) return 'failed'
   if (isComplete.value) return 'completed'
   if (agentLogs.value.length > 0) return 'processing'
   return 'pending'
 })
 
 const statusText = computed(() => {
+  if (reportFailed.value) return 'Failed'
   if (isComplete.value) return 'Completed'
   if (agentLogs.value.length > 0) return 'Generating...'
   return 'Waiting'
@@ -2119,8 +2238,28 @@ const stopPolling = () => {
   }
 }
 
+// 页面可见性检测：后台时暂停轮询，防止凌晨无效API调用
+const handleVisibilityChange = () => {
+  if (document.hidden) {
+    // 页面进入后台，暂停所有轮询
+    if (agentLogTimer || consoleLogTimer) {
+      console.log('页面进入后台，暂停报告轮询')
+      stopPolling()
+    }
+  } else {
+    // 页面恢复前台，如果报告还未完成则恢复轮询
+    if (!isComplete.value && props.reportId && !agentLogTimer) {
+      console.log('页面恢复前台，恢复报告轮询')
+      startPolling()
+    }
+  }
+}
+
 // Lifecycle
 onMounted(() => {
+  // 注册页面可见性变化监听
+  document.addEventListener('visibilitychange', handleVisibilityChange)
+  
   if (props.reportId) {
     addLog(`Report Agent initialized: ${props.reportId}`)
     startPolling()
@@ -2128,6 +2267,8 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+  // 移除页面可见性监听
+  document.removeEventListener('visibilitychange', handleVisibilityChange)
   stopPolling()
 })
 
@@ -2159,6 +2300,124 @@ watch(() => props.reportId, (newId) => {
   background: #F8F9FA;
   font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
   overflow: hidden;
+}
+
+/* ========== 失败横幅样式 ========== */
+.failure-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 24px;
+  background: linear-gradient(135deg, #FEF2F2 0%, #FEE2E2 100%);
+  border-bottom: 1px solid #FECACA;
+  gap: 20px;
+}
+
+.failure-info {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.failure-icon {
+  font-size: 24px;
+  flex-shrink: 0;
+}
+
+.failure-text {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.failure-text strong {
+  font-size: 14px;
+  font-weight: 600;
+  color: #991B1B;
+}
+
+.failure-reason {
+  font-size: 13px;
+  color: #B91C1C;
+  margin: 0;
+}
+
+.failure-text .progress-info {
+  font-size: 12px;
+  color: #7F1D1D;
+  opacity: 0.8;
+  margin: 0;
+}
+
+.failure-actions {
+  display: flex;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+.btn-resume,
+.btn-regenerate {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 16px;
+  font-size: 13px;
+  font-weight: 500;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.2s;
+  border: none;
+}
+
+.btn-resume {
+  background: #DC2626;
+  color: white;
+}
+
+.btn-resume:hover:not(:disabled) {
+  background: #B91C1C;
+}
+
+.btn-regenerate {
+  background: white;
+  color: #DC2626;
+  border: 1px solid #FECACA;
+}
+
+.btn-regenerate:hover:not(:disabled) {
+  background: #FEF2F2;
+  border-color: #DC2626;
+}
+
+.btn-resume:disabled,
+.btn-regenerate:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.btn-resume svg,
+.btn-regenerate svg {
+  width: 14px;
+  height: 14px;
+}
+
+.loading-spinner-small {
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(255,255,255,0.3);
+  border-top-color: white;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+/* status pill failed state */
+.metric-pill.pill--failed {
+  background: #FEE2E2;
+  color: #DC2626;
 }
 
 /* Main Split Layout */
@@ -3353,6 +3612,44 @@ watch(() => props.reportId, (newId) => {
   color: #065F46;
   font-weight: 600;
   font-size: 14px;
+}
+
+.complete-actions {
+  display: flex;
+  gap: 10px;
+  width: calc(100% - 40px);
+  margin: 4px 20px 0 20px;
+}
+
+.download-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 14px 20px;
+  font-size: 14px;
+  font-weight: 600;
+  color: #1F2937;
+  background: #FFFFFF;
+  border: 1px solid #E5E7EB;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.download-btn:hover {
+  background: #F9FAFB;
+  border-color: #D1D5DB;
+}
+
+.download-btn svg {
+  color: #10B981;
+}
+
+.complete-actions .next-step-btn {
+  flex: 1;
+  width: auto;
+  margin: 0;
 }
 
 .next-step-btn {

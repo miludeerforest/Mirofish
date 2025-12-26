@@ -1,17 +1,44 @@
 """
 LLM客户端封装
-统一使用OpenAI格式调用
+统一使用OpenAI格式调用，支持自动重试
 """
 
 import json
+import logging
 from typing import Optional, Dict, Any, List
-from openai import OpenAI
+from openai import OpenAI, APIStatusError, APIConnectionError, APITimeoutError
+
+from tenacity import (
+    retry,
+    stop_after_attempt,
+    wait_exponential,
+    retry_if_exception,
+    before_sleep_log
+)
 
 from ..config import Config
 
+logger = logging.getLogger('mirofish.llm_client')
+
+
+def _is_retryable_error(exception: BaseException) -> bool:
+    """判断是否为可重试的错误"""
+    # 连接和超时错误
+    if isinstance(exception, (APIConnectionError, APITimeoutError)):
+        return True
+    # API 状态错误（500, 502, 503, 504, 529）
+    if isinstance(exception, APIStatusError):
+        return exception.status_code in (500, 502, 503, 504, 529)
+    return False
+
 
 class LLMClient:
-    """LLM客户端"""
+    """LLM客户端（支持自动重试）"""
+    
+    # 重试配置
+    MAX_RETRIES = 3
+    RETRY_MIN_WAIT = 1  # 最小等待秒数
+    RETRY_MAX_WAIT = 8  # 最大等待秒数
     
     def __init__(
         self,
@@ -31,6 +58,17 @@ class LLMClient:
             base_url=self.base_url
         )
     
+    @retry(
+        stop=stop_after_attempt(MAX_RETRIES),
+        wait=wait_exponential(multiplier=1, min=RETRY_MIN_WAIT, max=RETRY_MAX_WAIT),
+        retry=retry_if_exception(_is_retryable_error),
+        before_sleep=before_sleep_log(logger, logging.WARNING),
+        reraise=True
+    )
+    def _call_api(self, **kwargs) -> Any:
+        """带重试的 API 调用"""
+        return self.client.chat.completions.create(**kwargs)
+    
     def chat(
         self,
         messages: List[Dict[str, str]],
@@ -39,7 +77,7 @@ class LLMClient:
         response_format: Optional[Dict] = None
     ) -> str:
         """
-        发送聊天请求
+        发送聊天请求（自动重试）
         
         Args:
             messages: 消息列表
@@ -60,7 +98,7 @@ class LLMClient:
         if response_format:
             kwargs["response_format"] = response_format
         
-        response = self.client.chat.completions.create(**kwargs)
+        response = self._call_api(**kwargs)
         return response.choices[0].message.content
     
     def chat_json(

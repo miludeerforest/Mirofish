@@ -1,5 +1,31 @@
 <template>
   <div class="env-setup-panel">
+    <!-- 重试模式提示横幅 -->
+    <div v-if="isRetryMode" class="retry-banner">
+      <div class="retry-header">
+        <span class="retry-icon">🔄</span>
+        <div class="retry-info">
+          <strong>OOM 恢复模式</strong>
+          <p>上次模拟因内存不足中断，建议降低以下参数后重试</p>
+        </div>
+      </div>
+      <div class="retry-config-form">
+        <div class="config-field">
+          <label>模拟时长 (小时)</label>
+          <input type="number" v-model.number="retryConfig.hours" min="24" max="168" />
+          <span class="field-hint">原值: {{ simulationConfig?.time_config?.total_simulation_hours || '-' }}</span>
+        </div>
+        <div class="config-field">
+          <label>每小时最大 Agent</label>
+          <input type="number" v-model.number="retryConfig.maxAgents" min="5" max="50" />
+          <span class="field-hint">原值: {{ simulationConfig?.time_config?.agents_per_hour_max || '-' }}</span>
+        </div>
+        <button class="btn-apply-retry" @click="applyRetryConfig">
+          应用并继续
+        </button>
+      </div>
+    </div>
+
     <div class="scroll-container">
       <!-- Step 01: 模拟实例 -->
       <div class="step-card" :class="{ 'active': phase === 0, 'completed': phase > 0 }">
@@ -633,13 +659,18 @@
 
 <script setup>
 import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
+import { useRoute } from 'vue-router'
 import { 
   prepareSimulation, 
   getPrepareStatus, 
   getSimulationProfilesRealtime,
   getSimulationConfig,
-  getSimulationConfigRealtime 
+  getSimulationConfigRealtime,
+  updateSimulationConfig,
+  getRunStatus
 } from '../api/simulation'
+
+const route = useRoute()
 
 const props = defineProps({
   simulationId: String,  // 从父组件传入
@@ -671,6 +702,17 @@ let lastLoggedConfigStage = ''
 // 模拟轮数配置
 const useCustomRounds = ref(false) // 默认使用自动配置轮数
 const customMaxRounds = ref(40)   // 默认推荐40轮
+
+// ========== 重试模式（OOM 恢复） ==========
+const isRetryMode = computed(() => {
+  return route.query.retry === 'true' && route.query.fromFailure === 'true'
+})
+const previousRunStatus = ref(null)
+const retryConfig = ref({
+  hours: 72,        // 默认减少到 72 小时
+  maxAgents: 30,    // 默认减少到 30
+  minutesPerRound: 60
+})
 
 // Watch stage to update phase
 watch(currentStage, (newStage) => {
@@ -763,6 +805,72 @@ const truncateBio = (bio) => {
 
 const selectProfile = (profile) => {
   selectedProfile.value = profile
+}
+
+// ========== 重试模式方法 ==========
+const loadPreviousRunStatus = async () => {
+  if (!props.simulationId) return
+  try {
+    const res = await getRunStatus(props.simulationId)
+    if (res.success && res.data) {
+      previousRunStatus.value = res.data
+      // 如果有现有配置，用原值的较小值作为默认重试值
+      if (simulationConfig.value?.time_config) {
+        const originalHours = simulationConfig.value.time_config.total_simulation_hours
+        const originalMaxAgents = simulationConfig.value.time_config.agents_per_hour_max
+        retryConfig.value.hours = Math.min(72, originalHours || 72)
+        retryConfig.value.maxAgents = Math.min(30, originalMaxAgents || 30)
+      }
+      addLog(`检测到上次模拟失败，进度: ${res.data.progress_percent?.toFixed(0) || 0}%`)
+    }
+  } catch (err) {
+    console.warn('获取上次运行状态失败:', err)
+  }
+}
+
+const applyRetryConfig = async () => {
+  if (!props.simulationId) {
+    addLog('错误：缺少 simulationId')
+    return
+  }
+  
+  addLog('正在应用新的模拟配置...')
+  
+  try {
+    // 调用后端 API 更新配置
+    const res = await updateSimulationConfig({
+      simulation_id: props.simulationId,
+      updates: {
+        total_simulation_hours: retryConfig.value.hours,
+        agents_per_hour_max: retryConfig.value.maxAgents
+      }
+    })
+    
+    if (res.success) {
+      addLog(`✓ 配置已更新: 时长=${retryConfig.value.hours}h, 最大Agent=${retryConfig.value.maxAgents}`)
+      // 重新加载配置
+      await loadSimulationConfig()
+      // 自动切换到自定义轮数模式
+      useCustomRounds.value = true
+      customMaxRounds.value = Math.min(40, Math.floor((retryConfig.value.hours * 60) / 60))
+    } else {
+      addLog(`✗ 配置更新失败: ${res.error || '未知错误'}`)
+    }
+  } catch (err) {
+    addLog(`✗ 配置更新异常: ${err.message}`)
+  }
+}
+
+const loadSimulationConfig = async () => {
+  if (!props.simulationId) return
+  try {
+    const res = await getSimulationConfig(props.simulationId)
+    if (res.success && res.data) {
+      simulationConfig.value = res.data
+    }
+  } catch (err) {
+    console.warn('加载配置失败:', err)
+  }
 }
 
 // 自动开始准备模拟
@@ -1062,15 +1170,52 @@ watch(() => props.systemLogs?.length, () => {
   })
 })
 
-onMounted(() => {
+// 页面可见性检测：后台时暂停轮询，防止凌晨无效API调用
+const handleVisibilityChange = () => {
+  if (document.hidden) {
+    // 页面进入后台，暂停所有轮询
+    if (pollTimer || profilesTimer || configTimer) {
+      addLog('页面进入后台，暂停状态轮询')
+      stopPolling()
+      stopProfilesPolling()
+      stopConfigPolling()
+    }
+  } else {
+    // 页面恢复前台，如果准备流程还在运行则恢复轮询
+    if (phase.value >= 1 && phase.value < 4 && !pollTimer) {
+      addLog('页面恢复前台，恢复状态轮询')
+      if (taskId.value) {
+        startPolling()
+        startProfilesPolling()
+      } else if (phase.value === 2 || phase.value === 3) {
+        startConfigPolling()
+      }
+    }
+  }
+}
+
+onMounted(async () => {
+  // 注册页面可见性变化监听
+  document.addEventListener('visibilitychange', handleVisibilityChange)
+  
   // 自动开始准备流程
   if (props.simulationId) {
     addLog('Step2 环境搭建初始化')
+    
+    // 如果是重试模式，先加载上次运行状态和配置
+    if (isRetryMode.value) {
+      addLog('检测到 OOM 恢复模式')
+      await loadSimulationConfig()
+      await loadPreviousRunStatus()
+    }
+    
     startPrepareSimulation()
   }
 })
 
 onUnmounted(() => {
+  // 移除页面可见性监听
+  document.removeEventListener('visibilitychange', handleVisibilityChange)
   stopPolling()
   stopProfilesPolling()
   stopConfigPolling()
@@ -2595,5 +2740,103 @@ onUnmounted(() => {
 .modal-leave-to .profile-modal {
   transform: scale(0.95) translateY(10px);
   opacity: 0;
+}
+
+/* ========== 重试模式横幅 ========== */
+.retry-banner {
+  background: linear-gradient(135deg, #FFF9E6 0%, #FFF5CC 100%);
+  border: 1px solid #F0D060;
+  border-left: 4px solid #E6A700;
+  padding: 16px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.retry-header {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.retry-icon {
+  font-size: 24px;
+  line-height: 1;
+}
+
+.retry-info {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.retry-info strong {
+  font-size: 14px;
+  font-weight: 700;
+  color: #8B6914;
+}
+
+.retry-info p {
+  font-size: 12px;
+  color: #6B5212;
+  margin: 0;
+}
+
+.retry-config-form {
+  display: flex;
+  align-items: flex-end;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.config-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.config-field label {
+  font-size: 11px;
+  font-weight: 600;
+  color: #6B5212;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.config-field input {
+  width: 100px;
+  padding: 8px 12px;
+  border: 1px solid #D4B82A;
+  border-radius: 4px;
+  font-size: 14px;
+  font-family: 'JetBrains Mono', monospace;
+  background: #FFF;
+}
+
+.config-field input:focus {
+  outline: none;
+  border-color: #C4A82A;
+  box-shadow: 0 0 0 3px rgba(230, 167, 0, 0.1);
+}
+
+.field-hint {
+  font-size: 10px;
+  color: #8B7A20;
+}
+
+.btn-apply-retry {
+  padding: 10px 20px;
+  background: #E6A700;
+  color: #FFF;
+  border: none;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.btn-apply-retry:hover {
+  background: #C99000;
 }
 </style>

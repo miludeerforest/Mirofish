@@ -608,11 +608,21 @@ class SimulationConfigGenerator:
     
     def _parse_time_config(self, result: Dict[str, Any], num_entities: int) -> TimeSimulationConfig:
         """解析时间配置结果，并验证agents_per_hour值不超过总agent数"""
+        # 配置上限（防止内存溢出）
+        MAX_SIMULATION_HOURS = 168  # 最大 7 天
+        MAX_AGENTS_PER_HOUR = 50    # 每小时最大激活 Agent 数
+        
+        # 获取并验证 total_simulation_hours
+        total_hours = result.get("total_simulation_hours", 72)
+        if total_hours > MAX_SIMULATION_HOURS:
+            logger.warning(f"total_simulation_hours ({total_hours}) 超过最大值 ({MAX_SIMULATION_HOURS})，已修正")
+            total_hours = MAX_SIMULATION_HOURS
+        
         # 获取原始值
         agents_per_hour_min = result.get("agents_per_hour_min", max(1, num_entities // 15))
         agents_per_hour_max = result.get("agents_per_hour_max", max(5, num_entities // 5))
         
-        # 验证并修正：确保不超过总agent数
+        # 验证并修正：确保不超过总agent数和最大限制
         if agents_per_hour_min > num_entities:
             logger.warning(f"agents_per_hour_min ({agents_per_hour_min}) 超过总Agent数 ({num_entities})，已修正")
             agents_per_hour_min = max(1, num_entities // 10)
@@ -621,13 +631,21 @@ class SimulationConfigGenerator:
             logger.warning(f"agents_per_hour_max ({agents_per_hour_max}) 超过总Agent数 ({num_entities})，已修正")
             agents_per_hour_max = max(agents_per_hour_min + 1, num_entities // 2)
         
+        # 限制最大 Agent 数
+        if agents_per_hour_max > MAX_AGENTS_PER_HOUR:
+            logger.warning(f"agents_per_hour_max ({agents_per_hour_max}) 超过最大值 ({MAX_AGENTS_PER_HOUR})，已修正")
+            agents_per_hour_max = MAX_AGENTS_PER_HOUR
+        
+        if agents_per_hour_min > MAX_AGENTS_PER_HOUR:
+            agents_per_hour_min = MAX_AGENTS_PER_HOUR // 2
+        
         # 确保 min < max
         if agents_per_hour_min >= agents_per_hour_max:
             agents_per_hour_min = max(1, agents_per_hour_max // 2)
             logger.warning(f"agents_per_hour_min >= max，已修正为 {agents_per_hour_min}")
         
         return TimeSimulationConfig(
-            total_simulation_hours=result.get("total_simulation_hours", 72),
+            total_simulation_hours=total_hours,
             minutes_per_round=result.get("minutes_per_round", 60),  # 默认每轮1小时
             agents_per_hour_min=agents_per_hour_min,
             agents_per_hour_max=agents_per_hour_max,

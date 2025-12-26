@@ -195,6 +195,156 @@ def generate_report():
         }), 500
 
 
+@report_bp.route('/<report_id>/resume', methods=['POST'])
+def resume_report(report_id: str):
+    """
+    恢复失败的报告生成（断点续传）
+    
+    从已完成的章节继续生成，跳过已保存的内容
+    
+    返回：
+        {
+            "success": true,
+            "data": {
+                "report_id": "report_xxxx",
+                "task_id": "task_xxxx",
+                "status": "resuming",
+                "skipped_sections": [1, 2],
+                "message": "报告恢复生成任务已启动"
+            }
+        }
+    """
+    try:
+        # 获取报告信息
+        report = ReportManager.get_report(report_id)
+        
+        if not report:
+            return jsonify({
+                "success": False,
+                "error": f"报告不存在: {report_id}"
+            }), 404
+        
+        if report.status == ReportStatus.COMPLETED:
+            return jsonify({
+                "success": True,
+                "data": {
+                    "report_id": report_id,
+                    "status": "completed",
+                    "message": "报告已完成，无需恢复"
+                }
+            })
+        
+        # 获取模拟和项目信息
+        simulation_id = report.simulation_id
+        manager = SimulationManager()
+        state = manager.get_simulation(simulation_id)
+        
+        if not state:
+            return jsonify({
+                "success": False,
+                "error": f"模拟不存在: {simulation_id}"
+            }), 404
+        
+        project = ProjectManager.get_project(state.project_id)
+        if not project:
+            return jsonify({
+                "success": False,
+                "error": f"项目不存在: {state.project_id}"
+            }), 404
+        
+        graph_id = report.graph_id
+        simulation_requirement = report.simulation_requirement
+        
+        # 检查已完成的章节
+        existing_sections = ReportManager.get_generated_sections(report_id)
+        skipped_indices = [s['section_index'] for s in existing_sections if not s.get('is_subsection')]
+        
+        # 创建恢复任务
+        task_manager = TaskManager()
+        task_id = task_manager.create_task(
+            task_type="report_resume",
+            metadata={
+                "report_id": report_id,
+                "simulation_id": simulation_id,
+                "skipped_sections": skipped_indices
+            }
+        )
+        
+        # 定义后台任务
+        def run_resume():
+            try:
+                task_manager.update_task(
+                    task_id,
+                    status=TaskStatus.PROCESSING,
+                    progress=0,
+                    message=f"恢复报告生成，跳过已完成章节: {skipped_indices}"
+                )
+                
+                # 创建Report Agent
+                agent = ReportAgent(
+                    graph_id=graph_id,
+                    simulation_id=simulation_id,
+                    simulation_requirement=simulation_requirement
+                )
+                
+                # 进度回调
+                def progress_callback(stage, progress, message):
+                    task_manager.update_task(
+                        task_id,
+                        progress=progress,
+                        message=f"[{stage}] {message}"
+                    )
+                
+                # 恢复生成（resume=True）
+                result = agent.generate_report(
+                    progress_callback=progress_callback,
+                    report_id=report_id,
+                    resume=True
+                )
+                
+                # 保存报告
+                ReportManager.save_report(result)
+                
+                if result.status == ReportStatus.COMPLETED:
+                    task_manager.complete_task(
+                        task_id,
+                        result={
+                            "report_id": result.report_id,
+                            "simulation_id": simulation_id,
+                            "status": "completed"
+                        }
+                    )
+                else:
+                    task_manager.fail_task(task_id, result.error or "报告恢复生成失败")
+                
+            except Exception as e:
+                logger.error(f"报告恢复生成失败: {str(e)}")
+                task_manager.fail_task(task_id, str(e))
+        
+        # 启动后台线程
+        thread = threading.Thread(target=run_resume, daemon=True)
+        thread.start()
+        
+        return jsonify({
+            "success": True,
+            "data": {
+                "report_id": report_id,
+                "task_id": task_id,
+                "status": "resuming",
+                "skipped_sections": skipped_indices,
+                "message": f"报告恢复生成任务已启动，跳过章节: {skipped_indices}"
+            }
+        })
+        
+    except Exception as e:
+        logger.error(f"恢复报告生成失败: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }), 500
+
+
 @report_bp.route('/generate/status', methods=['POST'])
 def get_generate_status():
     """

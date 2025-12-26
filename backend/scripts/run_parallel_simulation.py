@@ -27,6 +27,7 @@ OASIS 双平台并行模拟预设脚本
 
 import argparse
 import asyncio
+import gc
 import json
 import logging
 import multiprocessing
@@ -38,6 +39,9 @@ import sys
 import warnings
 from datetime import datetime
 from typing import Dict, Any, List, Optional, Tuple
+
+# 内存监控模块
+from memory_monitor import get_memory_monitor, cleanup_model_cache
 
 
 # 全局变量：用于信号处理
@@ -1240,6 +1244,13 @@ async def run_twitter_simulation(
         if (round_num + 1) % 20 == 0:
             progress = (round_num + 1) / total_rounds * 100
             log_info(f"Day {simulated_day}, {simulated_hour:02d}:00 - Round {round_num + 1}/{total_rounds} ({progress:.1f}%)")
+        
+        # 内存监控：每 50 轮或内存告急时自动执行 GC
+        memory_monitor = get_memory_monitor(threshold_percent=80.0, gc_interval=50)
+        if memory_monitor.check_and_cleanup():
+            mem_mb = memory_monitor.get_process_memory_mb()
+            if mem_mb > 0:
+                log_info(f"已执行内存清理，当前进程内存: {mem_mb:.1f}MB")
     
     # 注意：不关闭环境，保留给Interview使用
     
@@ -1439,6 +1450,13 @@ async def run_reddit_simulation(
         if (round_num + 1) % 20 == 0:
             progress = (round_num + 1) / total_rounds * 100
             log_info(f"Day {simulated_day}, {simulated_hour:02d}:00 - Round {round_num + 1}/{total_rounds} ({progress:.1f}%)")
+        
+        # 内存监控：每 50 轮或内存告急时自动执行 GC
+        memory_monitor = get_memory_monitor(threshold_percent=80.0, gc_interval=50)
+        if memory_monitor.check_and_cleanup():
+            mem_mb = memory_monitor.get_process_memory_mb()
+            if mem_mb > 0:
+                log_info(f"已执行内存清理，当前进程内存: {mem_mb:.1f}MB")
     
     # 注意：不关闭环境，保留给Interview使用
     

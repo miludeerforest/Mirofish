@@ -49,3 +49,35 @@ export const getReport = (reportId) => {
 export const chatWithReport = (data) => {
   return requestWithRetry(() => service.post('/api/report/chat', data), 3, 1000)
 }
+
+/**
+ * 恢复失败的报告生成（断点续传）
+ * @param {string} reportId - 报告ID
+ */
+export const resumeReport = (reportId) => {
+  return requestWithRetry(() => service.post(`/api/report/${reportId}/resume`), 3, 1000)
+}
+
+/**
+ * 获取报告列表
+ * @param {Object} params - { simulation_id?, limit? }
+ */
+export const listReports = (params = {}) => {
+  return service.get('/api/report/list', { params })
+}
+
+/**
+ * 下载报告（直接触发浏览器下载）
+ * @param {string} reportId - 报告ID
+ */
+export const downloadReport = (reportId) => {
+  window.open(`/api/report/${reportId}/download`, '_blank')
+}
+
+/**
+ * 删除报告
+ * @param {string} reportId - 报告ID
+ */
+export const deleteReport = (reportId) => {
+  return service.delete(`/api/report/${reportId}`)
+}

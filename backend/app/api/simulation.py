@@ -14,6 +14,7 @@ from ..services.oasis_profile_generator import OasisProfileGenerator
 from ..services.simulation_manager import SimulationManager, SimulationStatus
 from ..services.simulation_runner import SimulationRunner, RunnerStatus
 from ..utils.logger import get_logger
+from ..utils.auth import require_api_key
 from ..models.project import ProjectManager
 
 logger = get_logger('mirofish.api.simulation')
@@ -162,6 +163,7 @@ def get_entities_by_type(graph_id: str, entity_type: str):
 # ============== 模拟管理接口 ==============
 
 @simulation_bp.route('/create', methods=['POST'])
+@require_api_key
 def create_simulation():
     """
     创建新的模拟
@@ -356,6 +358,7 @@ def _check_simulation_prepared(simulation_id: str) -> tuple:
 
 
 @simulation_bp.route('/prepare', methods=['POST'])
+@require_api_key
 def prepare_simulation():
     """
     准备模拟环境（异步任务，LLM智能生成所有参数）
@@ -1113,6 +1116,128 @@ def get_simulation_config(simulation_id: str):
         }), 500
 
 
+@simulation_bp.route('/config/update', methods=['POST'])
+def update_simulation_config():
+    """
+    更新模拟配置（用于 OOM 恢复后调整参数）
+    
+    请求（JSON）：
+        {
+            "simulation_id": "sim_xxxx",       // 必填
+            "updates": {
+                "total_simulation_hours": 72,  // 可选，调整模拟时长
+                "agents_per_hour_max": 30      // 可选，调整每小时最大 Agent 数
+            }
+        }
+    
+    返回：
+        {
+            "success": true,
+            "data": {
+                "simulation_id": "sim_xxxx",
+                "updated_fields": ["total_simulation_hours", "agents_per_hour_max"],
+                "new_config": {...}
+            }
+        }
+    """
+    import json
+    
+    try:
+        data = request.get_json() or {}
+        
+        simulation_id = data.get('simulation_id')
+        if not simulation_id:
+            return jsonify({
+                "success": False,
+                "error": "请提供 simulation_id"
+            }), 400
+        
+        updates = data.get('updates', {})
+        if not updates:
+            return jsonify({
+                "success": False,
+                "error": "请提供 updates 参数"
+            }), 400
+        
+        # 获取模拟目录
+        sim_dir = os.path.join(Config.OASIS_SIMULATION_DATA_DIR, simulation_id)
+        config_file = os.path.join(sim_dir, "simulation_config.json")
+        
+        if not os.path.exists(config_file):
+            return jsonify({
+                "success": False,
+                "error": f"模拟配置不存在: {simulation_id}"
+            }), 404
+        
+        # 读取现有配置
+        with open(config_file, 'r', encoding='utf-8') as f:
+            config = json.load(f)
+        
+        updated_fields = []
+        
+        # 更新 time_config 中的字段
+        if 'time_config' not in config:
+            config['time_config'] = {}
+        
+        if 'total_simulation_hours' in updates:
+            new_hours = updates['total_simulation_hours']
+            # 验证范围
+            if new_hours < 24 or new_hours > 168:
+                return jsonify({
+                    "success": False,
+                    "error": "total_simulation_hours 必须在 24-168 之间"
+                }), 400
+            config['time_config']['total_simulation_hours'] = new_hours
+            updated_fields.append('total_simulation_hours')
+        
+        if 'agents_per_hour_max' in updates:
+            new_max_agents = updates['agents_per_hour_max']
+            # 验证范围
+            if new_max_agents < 5 or new_max_agents > 50:
+                return jsonify({
+                    "success": False,
+                    "error": "agents_per_hour_max 必须在 5-50 之间"
+                }), 400
+            config['time_config']['agents_per_hour_max'] = new_max_agents
+            # 确保 min <= max
+            if config['time_config'].get('agents_per_hour_min', 0) > new_max_agents:
+                config['time_config']['agents_per_hour_min'] = max(1, new_max_agents - 5)
+            updated_fields.append('agents_per_hour_max')
+        
+        if 'minutes_per_round' in updates:
+            new_minutes = updates['minutes_per_round']
+            if new_minutes < 15 or new_minutes > 120:
+                return jsonify({
+                    "success": False,
+                    "error": "minutes_per_round 必须在 15-120 之间"
+                }), 400
+            config['time_config']['minutes_per_round'] = new_minutes
+            updated_fields.append('minutes_per_round')
+        
+        # 写回配置文件
+        with open(config_file, 'w', encoding='utf-8') as f:
+            json.dump(config, f, ensure_ascii=False, indent=2)
+        
+        logger.info(f"模拟配置已更新: {simulation_id}, 字段: {updated_fields}")
+        
+        return jsonify({
+            "success": True,
+            "data": {
+                "simulation_id": simulation_id,
+                "updated_fields": updated_fields,
+                "new_time_config": config.get('time_config', {})
+            }
+        })
+        
+    except Exception as e:
+        logger.error(f"更新配置失败: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }), 500
+
+
 @simulation_bp.route('/<simulation_id>/config/download', methods=['GET'])
 def download_simulation_config(simulation_id: str):
     """下载模拟配置文件"""
@@ -1271,6 +1396,7 @@ def generate_profiles():
 # ============== 模拟运行控制接口 ==============
 
 @simulation_bp.route('/start', methods=['POST'])
+@require_api_key
 def start_simulation():
     """
     开始运行模拟

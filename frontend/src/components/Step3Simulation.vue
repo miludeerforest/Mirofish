@@ -91,7 +91,19 @@
       </div>
 
       <div class="action-controls">
+        <!-- 手动启动模拟按钮 -->
         <button 
+          v-if="phase === 0"
+          class="action-btn start"
+          :disabled="isStarting || !simulationId"
+          @click="doStartSimulation"
+        >
+          <span v-if="isStarting" class="loading-spinner-small"></span>
+          {{ isStarting ? '启动中...' : '▶ 开始模拟' }}
+        </button>
+        <!-- 生成报告按钮（模拟完成后显示） -->
+        <button 
+          v-else
           class="action-btn primary"
           :disabled="phase !== 2 || isGeneratingReport"
           @click="handleNextStep"
@@ -99,6 +111,28 @@
           <span v-if="isGeneratingReport" class="loading-spinner-small"></span>
           {{ isGeneratingReport ? '启动中...' : '开始生成结果报告' }} 
           <span v-if="!isGeneratingReport" class="arrow-icon">→</span>
+        </button>
+      </div>
+    </div>
+
+    <!-- 失败状态横幅 -->
+    <div v-if="simulationFailed" class="failure-banner">
+      <div class="failure-info">
+        <span class="failure-icon">⚠️</span>
+        <div class="failure-text">
+          <strong>模拟中断</strong>
+          <p class="failure-reason">{{ failureReason }}</p>
+          <p class="progress-info">已完成 {{ runStatus.progress_percent?.toFixed(0) || 0 }}% ({{ runStatus.current_round || 0 }}/{{ runStatus.total_rounds || '-' }} 轮)</p>
+        </div>
+      </div>
+      <div class="failure-actions">
+        <button class="btn-adjust" @click="goToAdjustSettings">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
+          调整参数重试
+        </button>
+        <button class="btn-restart" @click="restartSimulation">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+          直接重新开始
         </button>
       </div>
     </div>
@@ -357,6 +391,83 @@ const redditElapsedTime = computed(() => {
   return formatElapsedTime(runStatus.value.reddit_current_round || 0)
 })
 
+// ========== 失败状态检测与恢复 ==========
+const simulationFailed = computed(() => {
+  return runStatus.value.runner_status === 'failed'
+})
+
+const failureReason = computed(() => {
+  const error = runStatus.value.error || ''
+  if (error.includes('-9') || error.includes('OOM') || error.includes('memory')) {
+    return '内存不足 (OOM)，建议减少模拟时长或 Agent 数量'
+  }
+  if (error.includes('-15')) {
+    return '进程被终止 (SIGTERM)'
+  }
+  return error || '未知错误'
+})
+
+// 跳转到调整参数页面
+const goToAdjustSettings = () => {
+  addLog('正在跳转到参数调整页面...')
+  router.push({
+    name: 'Simulation',
+    params: { simulationId: props.simulationId },
+    query: { retry: 'true', fromFailure: 'true' }
+  })
+}
+
+// 直接重新开始模拟（用户手动触发，使用 force 参数强制重启）
+const restartSimulation = async () => {
+  if (!props.simulationId) {
+    addLog('错误：缺少 simulationId')
+    return
+  }
+  
+  addLog('准备强制重新开始模拟...')
+  resetAllState()
+  
+  isStarting.value = true
+  startError.value = null
+  emit('update-status', 'processing')
+  
+  try {
+    const params = {
+      simulation_id: props.simulationId,
+      platform: 'parallel',
+      force: true,  // 用户手动重启时使用 force
+      enable_graph_memory_update: true
+    }
+    
+    if (props.maxRounds) {
+      params.max_rounds = props.maxRounds
+    }
+    
+    const res = await startSimulation(params)
+    
+    if (res.success && res.data) {
+      addLog('✓ 已清理旧的模拟日志，重新开始模拟')
+      addLog(`  ├─ PID: ${res.data.process_pid || '-'}`)
+      
+      phase.value = 1
+      runStatus.value = res.data
+      
+      startStatusPolling()
+      startDetailPolling()
+    } else {
+      startError.value = res.error || '重启失败'
+      addLog(`✗ 重启失败: ${res.error || '未知错误'}`)
+      emit('update-status', 'error')
+    }
+  } catch (err) {
+    startError.value = err.message
+    addLog(`✗ 重启异常: ${err.message}`)
+    emit('update-status', 'error')
+  } finally {
+    isStarting.value = false
+  }
+}
+
 // Methods
 const addLog = (msg) => {
   emit('add-log', msg)
@@ -395,7 +506,7 @@ const doStartSimulation = async () => {
     const params = {
       simulation_id: props.simulationId,
       platform: 'parallel',
-      force: true,  // 强制重新开始
+      force: false,  // 不强制重新开始，防止无限重启循环
       enable_graph_memory_update: true  // 开启动态图谱更新
     }
     
@@ -506,6 +617,15 @@ const fetchRunStatus = async () => {
       if (data.reddit_current_round > prevRedditRound.value) {
         addLog(`[Community] R${data.reddit_current_round}/${data.total_rounds} | T:${data.reddit_simulated_hours || 0}h | A:${data.reddit_actions_count}`)
         prevRedditRound.value = data.reddit_current_round
+      }
+      
+      // 检测模拟是否已失败（停止轮询，防止无限重启循环）
+      if (data.runner_status === 'failed') {
+        addLog(`⚠️ 模拟失败: ${data.error || '未知错误'}`)
+        addLog('已停止自动轮询，请手动选择操作')
+        stopPolling()
+        emit('update-status', 'error')
+        return  // 不自动重启，让用户决定
       }
       
       // 检测模拟是否已完成（通过 runner_status 或平台完成状态判断）
@@ -684,14 +804,34 @@ watch(() => props.systemLogs?.length, () => {
   })
 })
 
+// 页面可见性检测：后台时暂停轮询，防止凌晨无效API调用
+const handleVisibilityChange = () => {
+  if (document.hidden) {
+    // 页面进入后台，暂停轮询
+    if (statusTimer || detailTimer) {
+      addLog('页面进入后台，暂停状态轮询')
+      stopPolling()
+    }
+  } else {
+    // 页面恢复前台，如果模拟正在运行则恢复轮询
+    if (phase.value === 1 && !statusTimer) {
+      addLog('页面恢复前台，恢复状态轮询')
+      startStatusPolling()
+      startDetailPolling()
+    }
+  }
+}
+
 onMounted(() => {
   addLog('Step3 模拟运行初始化')
-  if (props.simulationId) {
-    doStartSimulation()
-  }
+  addLog('请点击「开始模拟」按钮启动模拟')
+  // 注册页面可见性变化监听
+  document.addEventListener('visibilitychange', handleVisibilityChange)
 })
 
 onUnmounted(() => {
+  // 移除页面可见性监听
+  document.removeEventListener('visibilitychange', handleVisibilityChange)
   stopPolling()
 })
 </script>
@@ -891,6 +1031,15 @@ onUnmounted(() => {
 
 .action-btn.primary:hover:not(:disabled) {
   background: #333;
+}
+
+.action-btn.start {
+  background: #1A936F;
+  color: #FFF;
+}
+
+.action-btn.start:hover:not(:disabled) {
+  background: #157a5c;
 }
 
 .action-btn:disabled {
@@ -1250,7 +1399,6 @@ onUnmounted(() => {
 .log-msg { color: #BBB; word-break: break-all; }
 .mono { font-family: 'JetBrains Mono', monospace; }
 
-/* Loading spinner for button */
 .loading-spinner-small {
   display: inline-block;
   width: 14px;
@@ -1260,5 +1408,95 @@ onUnmounted(() => {
   border-radius: 50%;
   animation: spin 0.8s linear infinite;
   margin-right: 6px;
+}
+
+/* ========== 失败状态横幅 ========== */
+.failure-banner {
+  background: linear-gradient(135deg, #FFF5F5 0%, #FFF0F0 100%);
+  border: 1px solid #FED7D7;
+  border-left: 4px solid #E53E3E;
+  padding: 16px 24px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin: 0;
+}
+
+.failure-info {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.failure-icon {
+  font-size: 24px;
+  line-height: 1;
+}
+
+.failure-text {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.failure-text strong {
+  font-size: 14px;
+  font-weight: 700;
+  color: #C53030;
+}
+
+.failure-reason {
+  font-size: 12px;
+  color: #742A2A;
+  margin: 0;
+}
+
+.progress-info {
+  font-size: 11px;
+  color: #9B2C2C;
+  font-family: 'JetBrains Mono', monospace;
+  margin: 0;
+}
+
+.failure-actions {
+  display: flex;
+  gap: 12px;
+}
+
+.btn-adjust, .btn-restart {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 16px;
+  font-size: 12px;
+  font-weight: 600;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.2s;
+  border: none;
+}
+
+.btn-adjust {
+  background: #FFF;
+  color: #C53030;
+  border: 1px solid #FC8181;
+}
+
+.btn-adjust:hover {
+  background: #FED7D7;
+  border-color: #E53E3E;
+}
+
+.btn-restart {
+  background: #C53030;
+  color: #FFF;
+}
+
+.btn-restart:hover {
+  background: #9B2C2C;
+}
+
+.btn-adjust svg, .btn-restart svg {
+  flex-shrink: 0;
 }
 </style>

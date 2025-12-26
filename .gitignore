@@ -10,6 +10,9 @@ Thumbs.db
 .env.test
 .env.production
 
+# Docker 开发配置（不提交）
+docker-compose.override.yml
+
 # Python
 __pycache__/
 *.py[cod]

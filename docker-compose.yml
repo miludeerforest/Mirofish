@@ -1,62 +1,101 @@
 services:
+  # ==================== Backend API ====================
   backend:
     build:
       context: ./backend
       dockerfile: Dockerfile
     container_name: mirofish-backend
-    ports:
-      - "5002:5002"
+    env_file:
+      - .env
     environment:
       - FLASK_HOST=0.0.0.0
       - FLASK_PORT=5002
-    env_file:
-      - .env
-    volumes:
-      - ./backend:/app
-      - /app/.venv  # Exclude virtual environment from volume mount
+      - PYTHONMALLOC=malloc
     restart: unless-stopped
     networks:
       - mirofish-network
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+        reservations:
+          memory: 1G
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5002/')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
+  # ==================== Frontend (Vite Dev Server) ====================
   frontend:
     build:
       context: ./frontend
       dockerfile: Dockerfile
     container_name: mirofish-frontend
-    ports:
-      - "3001:3001"
     environment:
       - VITE_API_URL=http://backend:5002
-    volumes:
-      - ./frontend:/app
-      - /app/node_modules  # Exclude node_modules from volume mount
+      - VITE_API_BASE_URL=
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
     restart: unless-stopped
     networks:
       - mirofish-network
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+        reservations:
+          memory: 256M
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3001"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
-  # FalkorDB - Graphiti 知识图谱存储
+  # ==================== FalkorDB (Knowledge Graph) ====================
   falkordb:
     image: falkordb/falkordb:latest
     container_name: mirofish-falkordb
-    ports:
-      - "6380:6379"    # Redis 协议（避免与系统 Redis 冲突）
-      - "3002:3000"    # FalkorDB 浏览器
     volumes:
       - falkordb_data:/data
     restart: unless-stopped
     networks:
       - mirofish-network
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 512M
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
+# ==================== Networks ====================
 networks:
   mirofish-network:
     driver: bridge
 
+# ==================== Volumes ====================
 volumes:
   falkordb_data:

@@ -989,3 +989,597 @@ def get_entity_reader_service(api_key: Optional[str] = None):
         from .zep_entity_reader import ZepEntityReader
         logger.info("使用 Zep Cloud 实体读取服务")
         return ZepEntityReader(api_key)
+
+
+# ==================== GraphitiToolsService ====================
+# 提供与 ZepToolsService 兼容的接口，使 report_agent 可以使用 FalkorDB
+
+
+@dataclass
+class GraphitiSearchResult:
+    """搜索结果（与 zep_tools.SearchResult 兼容）"""
+    facts: List[str]
+    edges: List[Dict[str, Any]]
+    nodes: List[Dict[str, Any]]
+    query: str
+    total_count: int
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "facts": self.facts,
+            "edges": self.edges,
+            "nodes": self.nodes,
+            "query": self.query,
+            "total_count": self.total_count
+        }
+    
+    def to_text(self) -> str:
+        """转换为文本格式，供LLM理解"""
+        text_parts = [f"搜索查询: {self.query}", f"找到 {self.total_count} 条相关信息"]
+        
+        if self.facts:
+            text_parts.append("\n### 相关事实:")
+            for i, fact in enumerate(self.facts, 1):
+                text_parts.append(f"{i}. {fact}")
+        
+        return "\n".join(text_parts)
+
+
+@dataclass
+class GraphitiInsightResult:
+    """深度洞察结果（与 zep_tools.InsightForgeResult 兼容）"""
+    query: str
+    simulation_requirement: str
+    sub_queries: List[str]
+    semantic_facts: List[str] = field(default_factory=list)
+    entity_insights: List[Dict[str, Any]] = field(default_factory=list)
+    relationship_chains: List[str] = field(default_factory=list)
+    total_facts: int = 0
+    total_entities: int = 0
+    total_relationships: int = 0
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "query": self.query,
+            "simulation_requirement": self.simulation_requirement,
+            "sub_queries": self.sub_queries,
+            "semantic_facts": self.semantic_facts,
+            "entity_insights": self.entity_insights,
+            "relationship_chains": self.relationship_chains,
+            "total_facts": self.total_facts,
+            "total_entities": self.total_entities,
+            "total_relationships": self.total_relationships
+        }
+    
+    def to_text(self) -> str:
+        """转换为详细的文本格式"""
+        text_parts = [
+            f"## 深度分析结果",
+            f"分析问题: {self.query}",
+            f"预测场景: {self.simulation_requirement}",
+            f"\n### 数据统计",
+            f"- 相关事实: {self.total_facts}条",
+            f"- 涉及实体: {self.total_entities}个",
+            f"- 关系链: {self.total_relationships}条"
+        ]
+        
+        if self.sub_queries:
+            text_parts.append(f"\n### 分析的子问题")
+            for i, sq in enumerate(self.sub_queries, 1):
+                text_parts.append(f"{i}. {sq}")
+        
+        if self.semantic_facts:
+            text_parts.append(f"\n### 【关键事实】")
+            for i, fact in enumerate(self.semantic_facts, 1):
+                text_parts.append(f'{i}. "{fact}"')
+        
+        if self.entity_insights:
+            text_parts.append(f"\n### 【核心实体】")
+            for entity in self.entity_insights:
+                text_parts.append(f"- **{entity.get('name', '未知')}** ({entity.get('type', '实体')})")
+                if entity.get('summary'):
+                    text_parts.append(f'  摘要: "{entity.get("summary")}"')
+        
+        if self.relationship_chains:
+            text_parts.append(f"\n### 【关系链】")
+            for chain in self.relationship_chains:
+                text_parts.append(f"- {chain}")
+        
+        return "\n".join(text_parts)
+
+
+@dataclass
+class GraphitiPanoramaResult:
+    """广度搜索结果（与 zep_tools.PanoramaResult 兼容）"""
+    query: str
+    all_nodes: List[Dict[str, Any]] = field(default_factory=list)
+    all_edges: List[Dict[str, Any]] = field(default_factory=list)
+    active_facts: List[str] = field(default_factory=list)
+    historical_facts: List[str] = field(default_factory=list)
+    total_nodes: int = 0
+    total_edges: int = 0
+    active_count: int = 0
+    historical_count: int = 0
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "query": self.query,
+            "all_nodes": self.all_nodes,
+            "all_edges": self.all_edges,
+            "active_facts": self.active_facts,
+            "historical_facts": self.historical_facts,
+            "total_nodes": self.total_nodes,
+            "total_edges": self.total_edges,
+            "active_count": self.active_count,
+            "historical_count": self.historical_count
+        }
+    
+    def to_text(self) -> str:
+        """转换为文本格式"""
+        text_parts = [
+            f"## 广度搜索结果",
+            f"查询: {self.query}",
+            f"\n### 统计信息",
+            f"- 总节点数: {self.total_nodes}",
+            f"- 总边数: {self.total_edges}",
+            f"- 当前有效事实: {self.active_count}条"
+        ]
+        
+        if self.active_facts:
+            text_parts.append(f"\n### 【当前有效事实】")
+            for i, fact in enumerate(self.active_facts, 1):
+                text_parts.append(f'{i}. "{fact}"')
+        
+        if self.all_nodes:
+            text_parts.append(f"\n### 【涉及实体】")
+            for node in self.all_nodes[:20]:  # 限制显示数量
+                name = node.get("name", "未知")
+                labels = node.get("labels", [])
+                entity_type = next((l for l in labels if l not in ["Entity", "Node"]), "实体")
+                text_parts.append(f"- **{name}** ({entity_type})")
+        
+        return "\n".join(text_parts)
+
+
+@dataclass
+class GraphitiInterviewResult:
+    """采访结果（与 zep_tools.InterviewResult 兼容）"""
+    interview_topic: str
+    interview_questions: List[str] = field(default_factory=list)
+    selected_agents: List[Dict[str, Any]] = field(default_factory=list)
+    interviews: List[Dict[str, Any]] = field(default_factory=list)
+    selection_reasoning: str = ""
+    summary: str = ""
+    total_agents: int = 0
+    interviewed_count: int = 0
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "interview_topic": self.interview_topic,
+            "interview_questions": self.interview_questions,
+            "selected_agents": self.selected_agents,
+            "interviews": self.interviews,
+            "selection_reasoning": self.selection_reasoning,
+            "summary": self.summary,
+            "total_agents": self.total_agents,
+            "interviewed_count": self.interviewed_count
+        }
+    
+    def to_text(self) -> str:
+        """转换为文本格式"""
+        text_parts = [
+            f"## 🎤 Agent采访报告",
+            f"**采访主题:** {self.interview_topic}",
+            f"**采访人数:** {self.interviewed_count} 位Agent"
+        ]
+        
+        if self.selection_reasoning:
+            text_parts.append(f"\n### 采访对象选择理由")
+            text_parts.append(self.selection_reasoning)
+        
+        if self.interviews:
+            text_parts.append(f"\n### 采访实录")
+            for i, interview in enumerate(self.interviews, 1):
+                agent_name = interview.get("agent_name", f"Agent_{i}")
+                agent_role = interview.get("agent_role", "未知角色")
+                response = interview.get("response", "")
+                text_parts.append(f"\n#### {agent_name} ({agent_role})")
+                text_parts.append(f"{response}")
+        
+        if self.summary:
+            text_parts.append(f"\n### 采访摘要")
+            text_parts.append(self.summary)
+        
+        return "\n".join(text_parts)
+
+
+class GraphitiToolsService:
+    """
+    FalkorDB 检索工具服务
+    
+    提供与 ZepToolsService 兼容的接口，使 report_agent 可以在 FalkorDB 后端下正常工作。
+    """
+    
+    def __init__(self, api_key: Optional[str] = None, llm_client = None):
+        self._falkordb = None
+        self._llm_client = llm_client
+        logger.info("GraphitiToolsService 初始化完成（使用 FalkorDB）")
+    
+    @property
+    def falkordb(self) -> FalkorDBClient:
+        """延迟初始化 FalkorDB 客户端"""
+        if self._falkordb is None:
+            self._falkordb = _get_falkordb_client()
+        return self._falkordb
+    
+    @property
+    def llm(self):
+        """延迟初始化 LLM 客户端"""
+        if self._llm_client is None:
+            from ..utils.llm_client import LLMClient
+            self._llm_client = LLMClient()
+        return self._llm_client
+    
+    def _get_all_nodes(self, graph_id: str) -> List[Dict[str, Any]]:
+        """获取图谱的所有节点"""
+        try:
+            result = self.falkordb.execute_query(
+                graph_id,
+                """
+                MATCH (n:Entity)
+                RETURN n.uuid AS uuid, n.name AS name, labels(n) AS labels,
+                       n.summary AS summary, n.attributes AS attributes, n.entity_type AS entity_type
+                """
+            )
+            
+            nodes = []
+            for row in result.result_set or []:
+                nodes.append({
+                    "uuid": row[0] or "",
+                    "name": row[1] or "",
+                    "labels": row[2] or [],
+                    "summary": row[3] or "",
+                    "attributes": json.loads(row[4]) if row[4] else {},
+                    "entity_type": row[5] or ""
+                })
+            return nodes
+        except Exception as e:
+            logger.error(f"获取节点失败: {e}")
+            return []
+    
+    def _get_all_edges(self, graph_id: str) -> List[Dict[str, Any]]:
+        """获取图谱的所有边"""
+        try:
+            result = self.falkordb.execute_query(
+                graph_id,
+                """
+                MATCH (s:Entity)-[r]->(t:Entity)
+                RETURN r.uuid AS uuid, type(r) AS name, r.fact AS fact,
+                       s.uuid AS source_node_uuid, t.uuid AS target_node_uuid,
+                       s.name AS source_name, t.name AS target_name
+                """
+            )
+            
+            edges = []
+            for row in result.result_set or []:
+                edges.append({
+                    "uuid": row[0] or "",
+                    "name": row[1] or "",
+                    "fact": row[2] or "",
+                    "source_node_uuid": row[3] or "",
+                    "target_node_uuid": row[4] or "",
+                    "source_name": row[5] or "",
+                    "target_name": row[6] or ""
+                })
+            return edges
+        except Exception as e:
+            logger.error(f"获取边失败: {e}")
+            return []
+    
+    def _keyword_search(self, items: List[Dict], query: str, key_fields: List[str], limit: int = 10) -> List[Dict]:
+        """简单的关键词搜索"""
+        query_lower = query.lower()
+        keywords = [w.strip() for w in query_lower.replace(',', ' ').replace('，', ' ').split() if len(w.strip()) > 1]
+        
+        def score(item: Dict) -> int:
+            s = 0
+            for field in key_fields:
+                text = str(item.get(field, "")).lower()
+                if query_lower in text:
+                    s += 100
+                for kw in keywords:
+                    if kw in text:
+                        s += 10
+            return s
+        
+        scored = [(score(item), item) for item in items]
+        scored.sort(key=lambda x: x[0], reverse=True)
+        return [item for s, item in scored[:limit] if s > 0]
+    
+    def get_graph_statistics(self, graph_id: str) -> Dict[str, Any]:
+        """获取图谱统计信息"""
+        try:
+            nodes = self._get_all_nodes(graph_id)
+            edges = self._get_all_edges(graph_id)
+            
+            # 统计实体类型
+            entity_types = {}
+            for node in nodes:
+                for label in node.get("labels", []):
+                    if label not in ["Entity", "Node"]:
+                        entity_types[label] = entity_types.get(label, 0) + 1
+            
+            return {
+                "total_nodes": len(nodes),
+                "total_edges": len(edges),
+                "entity_types": entity_types
+            }
+        except Exception as e:
+            logger.error(f"获取图谱统计失败: {e}")
+            return {"total_nodes": 0, "total_edges": 0, "entity_types": {}}
+    
+    def get_simulation_context(
+        self, 
+        graph_id: str, 
+        simulation_requirement: str, 
+        limit: int = 20
+    ) -> Dict[str, Any]:
+        """获取模拟上下文"""
+        logger.info(f"获取模拟上下文: {simulation_requirement[:50]}...")
+        
+        # 获取所有数据
+        all_nodes = self._get_all_nodes(graph_id)
+        all_edges = self._get_all_edges(graph_id)
+        
+        # 搜索相关事实
+        related_edges = self._keyword_search(all_edges, simulation_requirement, ["fact", "name"], limit)
+        facts = [e.get("fact", "") for e in related_edges if e.get("fact")]
+        
+        # 获取统计信息
+        stats = self.get_graph_statistics(graph_id)
+        
+        # 筛选有类型的实体
+        entities = []
+        for node in all_nodes:
+            custom_labels = [l for l in node.get("labels", []) if l not in ["Entity", "Node"]]
+            if custom_labels:
+                entities.append({
+                    "name": node.get("name", ""),
+                    "type": custom_labels[0],
+                    "summary": node.get("summary", "")
+                })
+        
+        return {
+            "simulation_requirement": simulation_requirement,
+            "related_facts": facts,
+            "graph_statistics": stats,
+            "entities": entities[:limit],
+            "total_entities": len(entities)
+        }
+    
+    def quick_search(self, graph_id: str, query: str, limit: int = 10) -> GraphitiSearchResult:
+        """简单搜索"""
+        logger.info(f"快速搜索: {query[:30]}...")
+        
+        all_edges = self._get_all_edges(graph_id)
+        all_nodes = self._get_all_nodes(graph_id)
+        
+        # 搜索边
+        matched_edges = self._keyword_search(all_edges, query, ["fact", "name", "source_name", "target_name"], limit)
+        facts = [e.get("fact", "") for e in matched_edges if e.get("fact")]
+        
+        # 搜索节点
+        matched_nodes = self._keyword_search(all_nodes, query, ["name", "summary"], limit)
+        for node in matched_nodes:
+            if node.get("summary"):
+                facts.append(f"[{node.get('name')}]: {node.get('summary')}")
+        
+        return GraphitiSearchResult(
+            facts=facts,
+            edges=matched_edges,
+            nodes=matched_nodes,
+            query=query,
+            total_count=len(facts)
+        )
+    
+    def insight_forge(
+        self,
+        graph_id: str,
+        query: str,
+        simulation_requirement: str,
+        report_context: str = "",
+        max_sub_queries: int = 5
+    ) -> GraphitiInsightResult:
+        """深度洞察检索"""
+        logger.info(f"深度洞察检索: {query[:50]}...")
+        
+        result = GraphitiInsightResult(
+            query=query,
+            simulation_requirement=simulation_requirement,
+            sub_queries=[]
+        )
+        
+        # 获取所有数据
+        all_nodes = self._get_all_nodes(graph_id)
+        all_edges = self._get_all_edges(graph_id)
+        
+        # 使用 LLM 生成子问题（简化版本）
+        sub_queries = [query]  # 至少包含原始查询
+        result.sub_queries = sub_queries
+        
+        # 收集所有相关事实
+        all_facts = []
+        seen_facts = set()
+        
+        for sub_query in sub_queries:
+            matched_edges = self._keyword_search(all_edges, sub_query, ["fact", "name"], 20)
+            for edge in matched_edges:
+                fact = edge.get("fact", "")
+                if fact and fact not in seen_facts:
+                    all_facts.append(fact)
+                    seen_facts.add(fact)
+        
+        result.semantic_facts = all_facts
+        result.total_facts = len(all_facts)
+        
+        # 收集相关实体
+        entity_insights = []
+        for node in all_nodes:
+            custom_labels = [l for l in node.get("labels", []) if l not in ["Entity", "Node"]]
+            if custom_labels:
+                entity_type = custom_labels[0]
+            else:
+                entity_type = node.get("entity_type", "实体")
+            
+            entity_insights.append({
+                "uuid": node.get("uuid", ""),
+                "name": node.get("name", ""),
+                "type": entity_type,
+                "summary": node.get("summary", ""),
+                "related_facts": []
+            })
+        
+        result.entity_insights = entity_insights[:30]  # 限制数量
+        result.total_entities = len(entity_insights)
+        
+        # 构建关系链
+        relationship_chains = []
+        for edge in all_edges[:50]:  # 限制数量
+            source = edge.get("source_name", edge.get("source_node_uuid", "")[:8])
+            target = edge.get("target_name", edge.get("target_node_uuid", "")[:8])
+            relation = edge.get("name", "RELATED")
+            chain = f"{source} --[{relation}]--> {target}"
+            relationship_chains.append(chain)
+        
+        result.relationship_chains = relationship_chains
+        result.total_relationships = len(relationship_chains)
+        
+        logger.info(f"深度洞察完成: {result.total_facts}条事实, {result.total_entities}个实体")
+        return result
+    
+    def panorama_search(
+        self,
+        graph_id: str,
+        query: str,
+        include_expired: bool = True
+    ) -> GraphitiPanoramaResult:
+        """广度搜索"""
+        logger.info(f"广度搜索: {query[:30]}...")
+        
+        all_nodes = self._get_all_nodes(graph_id)
+        all_edges = self._get_all_edges(graph_id)
+        
+        # 收集所有事实
+        active_facts = [e.get("fact", "") for e in all_edges if e.get("fact")]
+        
+        # 按相关性排序
+        if query:
+            matched_edges = self._keyword_search(all_edges, query, ["fact", "name"], len(all_edges))
+            active_facts = [e.get("fact", "") for e in matched_edges if e.get("fact")]
+        
+        return GraphitiPanoramaResult(
+            query=query,
+            all_nodes=all_nodes,
+            all_edges=all_edges,
+            active_facts=active_facts,
+            historical_facts=[],  # FalkorDB 不支持时间维度
+            total_nodes=len(all_nodes),
+            total_edges=len(all_edges),
+            active_count=len(active_facts),
+            historical_count=0
+        )
+    
+    def interview_agents(
+        self,
+        simulation_id: str,
+        interview_requirement: str,
+        simulation_requirement: str,
+        max_agents: int = 5
+    ) -> GraphitiInterviewResult:
+        """采访 Agent（简化实现）"""
+        logger.info(f"采访 Agent: {interview_requirement[:30]}...")
+        
+        # 这里简化实现，返回空结果
+        # 完整实现需要调用 OASIS 采访 API
+        return GraphitiInterviewResult(
+            interview_topic=interview_requirement,
+            interview_questions=[],
+            selected_agents=[],
+            interviews=[],
+            selection_reasoning="FalkorDB 模式下暂不支持 Agent 采访功能",
+            summary="",
+            total_agents=0,
+            interviewed_count=0
+        )
+    
+    def get_entity_summary(self, graph_id: str, entity_name: str) -> Dict[str, Any]:
+        """获取实体摘要"""
+        try:
+            result = self.falkordb.execute_query(
+                graph_id,
+                """
+                MATCH (n:Entity {name: $name})
+                OPTIONAL MATCH (n)-[r]-(m:Entity)
+                RETURN n.uuid AS uuid, n.name AS name, labels(n) AS labels,
+                       n.summary AS summary, collect(DISTINCT {type: type(r), other: m.name}) AS relations
+                """,
+                {"name": entity_name}
+            )
+            
+            if not result.result_set:
+                return {"error": f"未找到实体: {entity_name}"}
+            
+            row = result.result_set[0]
+            return {
+                "uuid": row[0],
+                "name": row[1],
+                "labels": row[2],
+                "summary": row[3],
+                "relations": row[4] or []
+            }
+        except Exception as e:
+            logger.error(f"获取实体摘要失败: {e}")
+            return {"error": str(e)}
+    
+    def get_entities_by_type(self, graph_id: str, entity_type: str) -> List[Dict[str, Any]]:
+        """按类型获取实体"""
+        try:
+            # 使用 _sanitize_label 转换后的类型查询
+            safe_type = _sanitize_label(entity_type)
+            
+            result = self.falkordb.execute_query(
+                graph_id,
+                f"""
+                MATCH (n:{safe_type})
+                RETURN n.uuid AS uuid, n.name AS name, labels(n) AS labels,
+                       n.summary AS summary
+                """
+            )
+            
+            entities = []
+            for row in result.result_set or []:
+                entities.append({
+                    "uuid": row[0],
+                    "name": row[1],
+                    "labels": row[2],
+                    "summary": row[3] or ""
+                })
+            
+            return entities
+        except Exception as e:
+            logger.error(f"获取类型实体失败: {e}")
+            return []
+
+
+def get_tools_service(api_key: Optional[str] = None):
+    """
+    获取检索工具服务
+    根据 USE_GRAPHITI 配置返回 FalkorDB 或 Zep 实现
+    """
+    if Config.USE_GRAPHITI:
+        logger.info("使用 FalkorDB 自托管检索工具服务")
+        return GraphitiToolsService(api_key)
+    else:
+        from .zep_tools import ZepToolsService
+        logger.info("使用 Zep Cloud 检索工具服务")
+        return ZepToolsService(api_key)

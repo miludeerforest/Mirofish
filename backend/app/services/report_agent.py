@@ -21,13 +21,7 @@ from enum import Enum
 from ..config import Config
 from ..utils.llm_client import LLMClient
 from ..utils.logger import get_logger
-from .zep_tools import (
-    ZepToolsService, 
-    SearchResult, 
-    InsightForgeResult, 
-    PanoramaResult,
-    InterviewResult
-)
+from .graphiti_adapter import get_tools_service
 
 logger = get_logger('mirofish.report_agent')
 
@@ -507,7 +501,7 @@ class ReportAgent:
         simulation_id: str,
         simulation_requirement: str,
         llm_client: Optional[LLMClient] = None,
-        zep_tools: Optional[ZepToolsService] = None
+        tools_service = None
     ):
         """
         初始化Report Agent
@@ -517,14 +511,15 @@ class ReportAgent:
             simulation_id: 模拟ID
             simulation_requirement: 模拟需求描述
             llm_client: LLM客户端（可选）
-            zep_tools: Zep工具服务（可选）
+            tools_service: 检索工具服务（可选，自动根据配置选择 FalkorDB 或 Zep）
         """
         self.graph_id = graph_id
         self.simulation_id = simulation_id
         self.simulation_requirement = simulation_requirement
         
         self.llm = llm_client or LLMClient()
-        self.zep_tools = zep_tools or ZepToolsService()
+        # 使用工厂函数根据 USE_GRAPHITI 配置选择正确的后端
+        self.zep_tools = tools_service or get_tools_service()
         
         # 工具定义
         self.tools = self._define_tools()
@@ -1360,10 +1355,11 @@ class ReportAgent:
     def generate_report(
         self, 
         progress_callback: Optional[Callable[[str, int, str], None]] = None,
-        report_id: Optional[str] = None
+        report_id: Optional[str] = None,
+        resume: bool = False
     ) -> Report:
         """
-        生成完整报告（分章节实时输出）
+        生成完整报告（分章节实时输出，支持断点续传）
         
         每个章节生成完成后立即保存到文件夹，不需要等待整个报告完成。
         文件结构：
@@ -1379,6 +1375,7 @@ class ReportAgent:
         Args:
             progress_callback: 进度回调函数 (stage, progress, message)
             report_id: 报告ID（可选，如果不传则自动生成）
+            resume: 是否为恢复模式（跳过已完成的章节）
             
         Returns:
             Report: 完整报告
@@ -1402,6 +1399,16 @@ class ReportAgent:
         # 已完成的章节标题列表（用于进度追踪）
         completed_section_titles = []
         
+        # 断点续传：检测已完成的章节索引
+        completed_section_indices = set()
+        if resume:
+            existing_sections = ReportManager.get_generated_sections(report_id)
+            for sec in existing_sections:
+                if not sec.get('is_subsection'):
+                    completed_section_indices.add(sec['section_index'])
+            if completed_section_indices:
+                logger.info(f"断点续传模式：跳过已完成的章节 {sorted(completed_section_indices)}")
+        
         try:
             # 初始化：创建报告文件夹并保存初始状态
             ReportManager._ensure_report_folder(report_id)
@@ -1423,34 +1430,42 @@ class ReportAgent:
             )
             ReportManager.save_report(report)
             
-            # 阶段1: 规划大纲
-            report.status = ReportStatus.PLANNING
-            ReportManager.update_progress(
-                report_id, "planning", 5, "开始规划报告大纲...",
-                completed_sections=[]
-            )
+            # 阶段1: 规划大纲（恢复模式尝试读取已有大纲）
+            outline = None
+            if resume:
+                outline = ReportManager.load_outline(report_id)
+                if outline:
+                    logger.info(f"断点续传：使用已有大纲，共{len(outline.sections)}个章节")
             
-            # 记录规划开始日志
-            self.report_logger.log_planning_start()
+            if not outline:
+                report.status = ReportStatus.PLANNING
+                ReportManager.update_progress(
+                    report_id, "planning", 5, "开始规划报告大纲...",
+                    completed_sections=[]
+                )
+                
+                # 记录规划开始日志
+                self.report_logger.log_planning_start()
+                
+                if progress_callback:
+                    progress_callback("planning", 0, "开始规划报告大纲...")
+                
+                outline = self.plan_outline(
+                    progress_callback=lambda stage, prog, msg: 
+                        progress_callback(stage, prog // 5, msg) if progress_callback else None
+                )
+                
+                # 记录规划完成日志
+                self.report_logger.log_planning_complete(outline.to_dict())
+                
+                # 保存大纲到文件
+                ReportManager.save_outline(report_id, outline)
+                ReportManager.update_progress(
+                    report_id, "planning", 15, f"大纲规划完成，共{len(outline.sections)}个章节",
+                    completed_sections=[]
+                )
             
-            if progress_callback:
-                progress_callback("planning", 0, "开始规划报告大纲...")
-            
-            outline = self.plan_outline(
-                progress_callback=lambda stage, prog, msg: 
-                    progress_callback(stage, prog // 5, msg) if progress_callback else None
-            )
             report.outline = outline
-            
-            # 记录规划完成日志
-            self.report_logger.log_planning_complete(outline.to_dict())
-            
-            # 保存大纲到文件
-            ReportManager.save_outline(report_id, outline)
-            ReportManager.update_progress(
-                report_id, "planning", 15, f"大纲规划完成，共{len(outline.sections)}个章节",
-                completed_sections=[]
-            )
             ReportManager.save_report(report)
             
             logger.info(f"大纲已保存到文件: {report_id}/outline.json")
@@ -1464,6 +1479,18 @@ class ReportAgent:
             for i, section in enumerate(outline.sections):
                 section_num = i + 1
                 base_progress = 20 + int((i / total_sections) * 70)
+                
+                # 断点续传：跳过已完成的章节
+                if section_num in completed_section_indices:
+                    logger.info(f"跳过已完成章节 {section_num}: {section.title}")
+                    # 读取已有内容加入上下文
+                    section_path = ReportManager._get_section_path(report_id, section_num)
+                    if os.path.exists(section_path):
+                        with open(section_path, 'r', encoding='utf-8') as f:
+                            existing_content = f.read()
+                        generated_sections.append(existing_content)
+                    completed_section_titles.append(section.title)
+                    continue
                 
                 # 更新进度
                 ReportManager.update_progress(
@@ -1979,6 +2006,52 @@ class ReportManager:
             json.dump(outline.to_dict(), f, ensure_ascii=False, indent=2)
         
         logger.info(f"大纲已保存: {report_id}")
+    
+    @classmethod
+    def load_outline(cls, report_id: str) -> Optional[ReportOutline]:
+        """
+        加载报告大纲（用于断点续传）
+        
+        Args:
+            report_id: 报告ID
+            
+        Returns:
+            ReportOutline 或 None（如果不存在）
+        """
+        outline_path = cls._get_outline_path(report_id)
+        
+        if not os.path.exists(outline_path):
+            return None
+        
+        try:
+            with open(outline_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            
+            # 重建 ReportOutline 对象
+            sections = []
+            for sec_data in data.get('sections', []):
+                subsections = [
+                    ReportSection(
+                        title=sub.get('title', ''),
+                        content=sub.get('content', ''),
+                        subsections=[]
+                    )
+                    for sub in sec_data.get('subsections', [])
+                ]
+                sections.append(ReportSection(
+                    title=sec_data.get('title', ''),
+                    content=sec_data.get('content', ''),
+                    subsections=subsections
+                ))
+            
+            return ReportOutline(
+                title=data.get('title', ''),
+                summary=data.get('summary', ''),
+                sections=sections
+            )
+        except Exception as e:
+            logger.warning(f"加载大纲失败: {e}")
+            return None
     
     @classmethod
     def save_section(

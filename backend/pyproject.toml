@@ -29,6 +29,7 @@ dependencies = [
     # 工具库
     "python-dotenv>=1.0.0",
     "pydantic>=2.0.0",
+    "tenacity>=8.0.0",
     
     # FalkorDB 知识图谱存储（原生库，避免与 camel-oasis 的 neo4j 版本冲突）
     "falkordb>=1.0.0",
